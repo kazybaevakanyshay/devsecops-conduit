@@ -1,0 +1,16 @@
+name: conduit
+
+services:
+  api:
+    image: ghcr.io/kazybaevakanyshay/conduit-api:${TAG}
+    network_mode: host
+    env_file: /etc/conduit/conduit.env
+    environment:
+      UVICORN_HOST: 127.0.0.1
+    restart: unless-stopped
+
+  web:
+    image: ghcr.io/kazybaevakanyshay/conduit-web:${TAG}
+    network_mode: host
+    env_file: /etc/conduit/web.env
+    restart: unless-stopped

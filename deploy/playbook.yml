@@ -1,37 +1,13 @@
-- name: Set up the Conduit server and release one commit
+- name: Release one commit as containers
   hosts: conduit
   become: true
-  vars:
-    revision: main
 
   tasks:
-    - name: Install the system packages
+    - name: Install Docker, Compose and the web server
       ansible.builtin.apt:
-        name: [git, acl, python3-venv, python3-packaging, python3-psycopg2, postgresql, caddy]
+        name: [docker.io, docker-compose-v2, caddy]
         update_cache: true
         cache_valid_time: 3600
-
-    - name: Download the Node.js installer
-      ansible.builtin.get_url:
-        url: https://deb.nodesource.com/setup_22.x
-        dest: /root/nodesource_setup.sh
-        mode: "0700"
-
-    - name: Add the Node.js package source
-      ansible.builtin.command: bash /root/nodesource_setup.sh
-      args:
-        creates: /etc/apt/sources.list.d/nodesource.sources
-
-    - name: Install Node.js
-      ansible.builtin.apt:
-        name: nodejs
-
-    - name: Create a user that can only run the application
-      ansible.builtin.user:
-        name: conduit
-        system: true
-        shell: /usr/sbin/nologin
-        create_home: false
 
     - name: Create the folder for the secrets
       ansible.builtin.file:
@@ -66,68 +42,36 @@
           SESSION_SECRET={{ lookup('ansible.builtin.password', '/dev/null', length=48, chars=['ascii_letters', 'digits']) }}
       no_log: true
 
-    - name: Read the database password back from the server
-      ansible.builtin.slurp:
-        src: /etc/conduit/conduit.env
-      register: secrets
-      no_log: true
+    - name: Create the folder of the application
+      ansible.builtin.file:
+        path: /opt/conduit
+        state: directory
+        mode: "0755"
 
-    - name: Create the database user
-      community.postgresql.postgresql_user:
-        name: conduit
-        password: "{{ secrets.content | b64decode | regex_search('POSTGRES_PASSWORD=(.+)', '\\1') | first }}"
-      become_user: postgres
-      no_log: true
-
-    - name: Create the database
-      community.postgresql.postgresql_db:
-        name: conduit
-        owner: conduit
-      become_user: postgres
-
-    - name: Get the code of one exact commit
-      ansible.builtin.git:
-        repo: "{{ repo_url }}"
-        dest: /opt/conduit/src
-        version: "{{ revision }}"
-        force: true
-      register: code
-      notify:
-        - Restart the API
-        - Restart the frontend
-
-    - name: Install the Python libraries
-      ansible.builtin.pip:
-        requirements: /opt/conduit/src/backend/requirements.txt
-        virtualenv: /opt/conduit/venv
-        virtualenv_command: python3 -m venv
-      notify: Restart the API
-
-    - name: Install the frontend libraries
-      ansible.builtin.command: npm install --no-package-lock
-      args:
-        chdir: /opt/conduit/src/frontend
-      when: code.changed
-
-    - name: Build the frontend
-      ansible.builtin.command: npm run build
-      args:
-        chdir: /opt/conduit/src/frontend
-      when: code.changed
-
-    - name: Install the API service
-      ansible.builtin.template:
-        src: conduit.service.j2
-        dest: /etc/systemd/system/conduit.service
+    - name: Describe the containers
+      ansible.builtin.copy:
+        src: compose.yaml
+        dest: /opt/conduit/compose.yaml
         mode: "0644"
-      notify: Restart the API
 
-    - name: Install the frontend service
-      ansible.builtin.template:
-        src: conduit-web.service.j2
-        dest: /etc/systemd/system/conduit-web.service
+    - name: Choose the version to run
+      ansible.builtin.copy:
+        dest: /opt/conduit/.env
+        content: "TAG={{ revision }}\n"
         mode: "0644"
-      notify: Restart the frontend
+
+    - name: Download the images of this version
+      ansible.builtin.command: docker compose pull
+      args:
+        chdir: /opt/conduit
+      changed_when: false
+
+    - name: Start this version and wait until it is healthy
+      ansible.builtin.command: docker compose up -d --wait --wait-timeout 180
+      args:
+        chdir: /opt/conduit
+      register: up
+      changed_when: "'Start' in up.stderr"
 
     - name: Configure the web server
       ansible.builtin.template:
@@ -136,24 +80,14 @@
         mode: "0644"
       notify: Reload the web server
 
-    - name: Start everything now and after every reboot
+    - name: Start the web server now and after every reboot
       ansible.builtin.systemd_service:
-        name: "{{ item }}"
+        name: caddy
         state: started
         enabled: true
-        daemon_reload: true
-      loop: [conduit, conduit-web, caddy]
 
-    - name: Apply restarts now if anything changed
+    - name: Apply the web server change now
       ansible.builtin.meta: flush_handlers
-
-    - name: Check that the API answers
-      ansible.builtin.uri:
-        url: http://127.0.0.1:8000/api/health-check
-      register: health
-      retries: 30
-      delay: 1
-      until: health.status == 200
 
     - name: Check that the frontend answers
       ansible.builtin.uri:
@@ -163,23 +97,18 @@
       delay: 1
       until: page.status == 200
 
+    - name: Ask the API which version runs
+      ansible.builtin.command: docker compose exec -T api curl -fs http://127.0.0.1:8000/api/health-check
+      args:
+        chdir: /opt/conduit
+      register: health
+      changed_when: false
+
     - name: Show the running version
       ansible.builtin.debug:
-        msg: "{{ health.json }}"
+        msg: "{{ health.stdout }}"
 
   handlers:
-    - name: Restart the API
-      ansible.builtin.systemd_service:
-        name: conduit
-        state: restarted
-        daemon_reload: true
-
-    - name: Restart the frontend
-      ansible.builtin.systemd_service:
-        name: conduit-web
-        state: restarted
-        daemon_reload: true
-
     - name: Reload the web server
       ansible.builtin.systemd_service:
         name: caddy

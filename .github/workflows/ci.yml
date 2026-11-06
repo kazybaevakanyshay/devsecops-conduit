@@ -56,9 +56,8 @@ jobs:
           docker push "$REGISTRY/conduit-web:$GITHUB_SHA"
 
   deploy:
-    needs: [unit-tests, secret-scan]
-    # Paused while the server moves to containers (Lesson 7). Lesson 8 turns it back on.
-    if: false
+    needs: [build-images]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -66,9 +65,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install Ansible
-        run: |
-          pip install ansible-core
-          ansible-galaxy collection install community.postgresql
+        run: pip install ansible-core
       - name: Give the robot its key
         run: |
           mkdir -p ~/.ssh
